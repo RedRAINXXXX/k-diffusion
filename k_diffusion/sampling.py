@@ -53,7 +53,7 @@ def get_ancestral_step(sigma_from, sigma_to, eta=1.):
     of noise to add (sigma_up) when doing an ancestral sampling step."""
     if not eta:
         return sigma_to, 0.
-    sigma_up = min(sigma_to, eta * (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5)
+    sigma_up = torch.min(sigma_to, eta * (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5)
     sigma_down = (sigma_to ** 2 - sigma_up ** 2) ** 0.5
     return sigma_down, sigma_up
 
@@ -114,6 +114,8 @@ class BrownianTreeNoiseSampler:
         return self.tree(t0, t1) / (t1 - t0).abs().sqrt()
 
 
+
+
 @torch.no_grad()
 def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
     """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)."""
@@ -135,25 +137,37 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
     return x
 
 
+# from torch.profiler import profile, record_function, ProfilerActivity
 @torch.no_grad()
 def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None):
     """Ancestral sampling with Euler method steps."""
     extra_args = {} if extra_args is None else extra_args
     noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
     s_in = x.new_ones([x.shape[0]])
+    # prof = profile(
+    #         activities=[ProfilerActivity.CPU],
+    #         with_stack=True,
+    #         schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+    #         on_trace_ready=torch.profiler.tensorboard_trace_handler('log'),
+    #         record_shapes=True,
+    # )
+    # prof.start()
+    sigma_downs, sigma_ups = get_ancestral_step(sigmas[:-1], sigmas[1:], eta=eta)
+    sigmas_np = sigmas.detach().cpu().numpy()
     for i in trange(len(sigmas) - 1, disable=disable):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
-        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        sigma_down, sigma_up = sigma_downs[i], sigma_ups[i]
         if callback is not None:
             callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
         d = to_d(x, sigmas[i], denoised)
         # Euler method
         dt = sigma_down - sigmas[i]
         x = x + d * dt
-        if sigmas[i + 1] > 0:
+        if sigmas_np[i + 1] > 0:
             x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+    #     prof.step()
+    # prof.stop()
     return x
-
 
 @torch.no_grad()
 def sample_heun(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
